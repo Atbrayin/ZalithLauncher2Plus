@@ -33,6 +33,7 @@ import java.io.File
 import java.io.FileNotFoundException
 
 private const val TAG = "DownloadTask"
+private const val MAX_RETRY_ATTEMPTS = 3
 
 class DownloadTask(
     val urls: List<String>,
@@ -44,12 +45,14 @@ class DownloadTask(
     val isDownloadable: Boolean,
     private val onDownloadFailed: (DownloadTask) -> Unit = {},
     private val onFileDownloadedSize: (Long) -> Unit = {},
-    private val onFileDownloaded: () -> Unit = {}
+    private val onFileDownloaded: () -> Unit = {},
+    private val expectedFileSize: Long = 0L
 ) {
     /**
      * 文件下载成功后执行的任务
      */
     var fileDownloadedTask: (suspend () -> Unit)? = null
+    private var attemptCount: Int = 0
 
     suspend fun download() {
         //若目标文件存在，验证通过或关闭完整性验证时，跳过此次下载
@@ -74,9 +77,28 @@ class DownloadTask(
             downloadedFile()
         }.onFailure { e ->
             if (e is CancellationException) throw e
-            //fix: 下载中途断开网络，导致过多文本刷入日志
-            //此处不再详细记录堆栈信息
-            Logger.error(TAG, "Download failed: ${file.absolutePath}\nurls: ${urls.joinToString("\n")}, string = ${e.getMessageOrToString()}")
+            
+            attemptCount++
+            val fileSize = if (file.exists()) FileUtils.sizeOf(file) else 0L
+            val isCorrupted = isFileCorrupted(fileSize)
+            
+            Logger.error(
+                TAG, 
+                "Download failed (Attempt $attemptCount/$MAX_RETRY_ATTEMPTS): ${file.absolutePath}\n" +
+                "File size: ${formatFileSize(fileSize)}, Expected: ${formatFileSize(expectedFileSize)}\n" +
+                "Corrupted: $isCorrupted\n" +
+                "Error: ${e.getMessageOrToString()}"
+            )
+            
+            // Solo eliminar archivos después de máximo de reintentos o si está claramente corrupto
+            if (isCorrupted && attemptCount >= MAX_RETRY_ATTEMPTS) {
+                Logger.warning(TAG, "File appears corrupted after $MAX_RETRY_ATTEMPTS attempts. Deleting: ${file.absolutePath}")
+                FileUtils.deleteQuietly(file)
+            } else if (attemptCount < MAX_RETRY_ATTEMPTS && fileSize > 0 && !isCorrupted) {
+                // Mantener el archivo parcialmente descargado para reintentos
+                Logger.info(TAG, "Keeping partial download for resumption. Size: ${formatFileSize(fileSize)}")
+            }
+            
             if (!isDownloadable && e is FileNotFoundException) throw e
             onDownloadFailed(this)
         }
@@ -108,9 +130,18 @@ class DownloadTask(
         }
 
         return if (compareSHA1(file, sha1)) {
+            Logger.info(TAG, "File verified successfully: ${file.absolutePath}")
             true
         } else {
-            FileUtils.deleteQuietly(file)
+            val fileSize = FileUtils.sizeOf(file)
+            Logger.warning(TAG, "SHA1 mismatch for ${file.absolutePath}. Size: ${formatFileSize(fileSize)}")
+            
+            // Solo eliminar si el archivo está claramente corrupto
+            if (isFileCorrupted(fileSize)) {
+                FileUtils.deleteQuietly(file)
+            } else {
+                Logger.info(TAG, "Keeping partial download for retry")
+            }
             false
         }
     }
@@ -126,10 +157,40 @@ class DownloadTask(
         }
 
         if (isAvailable) {
+            Logger.info(TAG, "File structure verified: ${file.absolutePath}")
             return true
         }
 
-        FileUtils.deleteQuietly(file)
+        Logger.warning(TAG, "File structure is invalid: ${file.absolutePath}")
+        val fileSize = FileUtils.sizeOf(file)
+        
+        // Solo eliminar si el archivo está obviamente corrupto
+        if (isFileCorrupted(fileSize)) {
+            FileUtils.deleteQuietly(file)
+        }
         return false
+    }
+    
+    /**
+     * Determina si un archivo está corrupto basándose en su tamaño
+     */
+    private fun isFileCorrupted(fileSize: Long): Boolean {
+        if (fileSize == 0L) return false
+        
+        // Si no conocemos el tamaño esperado
+        if (expectedFileSize <= 0) {
+            return fileSize < 1024 * 50 // Menos de 50KB es sospechoso
+        }
+        
+        // Si el archivo es menos del 30% del tamaño esperado
+        val ratio = fileSize.toDouble() / expectedFileSize.toDouble()
+        return ratio < 0.3
+    }
+    
+    private fun formatFileSize(bytes: Long): String {
+        if (bytes <= 0) return "0 B"
+        val units = arrayOf("B", "KB", "MB", "GB")
+        val digitGroups = (Math.log10(bytes.toDouble()) / Math.log10(1024.0)).toInt()
+        return String.format("%.2f %s", bytes / Math.pow(1024.0, digitGroups.toDouble()), units[digitGroups])
     }
 }

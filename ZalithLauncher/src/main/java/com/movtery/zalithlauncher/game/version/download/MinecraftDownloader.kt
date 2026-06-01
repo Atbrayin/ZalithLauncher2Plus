@@ -247,7 +247,7 @@ class MinecraftDownloader(
             clientName = clientName,
             mcFolder = clientVersionsDir,
             scheduleDownload = { urls, hash, targetFile, size ->
-                scheduleDownload(urls, hash, targetFile, size)
+                scheduleDownload(urls, hash, targetFile, size, expectedFileSize = size)
             },
             scheduleCopy = { targetFile ->
                 inheritsFrom?.let { inheritsFrom ->
@@ -267,17 +267,24 @@ class MinecraftDownloader(
             }
         )
         downloader.loadAssetsDownload(assetsIndex) { urls, hash, targetFile, size ->
-            scheduleDownload(urls, hash, targetFile, size)
+            scheduleDownload(urls, hash, targetFile, size, expectedFileSize = size)
         }
         downloader.loadLibraryDownloads(gameManifest) { urls, hash, targetFile, size, isDownloadable ->
-            scheduleDownload(urls, hash, targetFile, size, isDownloadable)
+            scheduleDownload(urls, hash, targetFile, size, isDownloadable, expectedFileSize = size)
         }
     }
 
     /**
      * 提交计划下载
      */
-    private fun scheduleDownload(urls: List<String>, sha1: String?, targetFile: File, size: Long, isDownloadable: Boolean = true) {
+    private fun scheduleDownload(
+        urls: List<String>,
+        sha1: String?,
+        targetFile: File,
+        size: Long,
+        isDownloadable: Boolean = true,
+        expectedFileSize: Long = size
+    ) {
         totalFileCount.incrementAndGet()
         totalFileSize.addAndGet(size)
         allDownloadTasks.add(
@@ -287,6 +294,7 @@ class MinecraftDownloader(
                 targetFile = targetFile,
                 sha1 = sha1,
                 isDownloadable = isDownloadable,
+                expectedFileSize = expectedFileSize,
                 onDownloadFailed = { task ->
                     downloadFailedTasks.add(task)
                 },
